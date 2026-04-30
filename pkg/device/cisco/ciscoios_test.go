@@ -33,6 +33,7 @@ func TestPrompt(t *testing.T) {
 		[]byte("\r\nhostname(ca-trustpoint)#"),
 		[]byte("\r\nhostname(cs-server)#"),
 		[]byte("\r\nhostname-32(ipsec-profile)#"),
+		[]byte("\r\nhostname(cfg-crypto-trans)#"),
 	}
 	testutils.ExprTester(t, errorCases, promptExpression)
 }
