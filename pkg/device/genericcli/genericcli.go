@@ -593,6 +593,8 @@ func GenericExecute(command cmd.Cmd, connector streamer.Connector, cli GenericCL
 	if len(cmdQuestions) > 0 {
 		questions = append(cmdQuestions, questions...)
 	}
+
+	exprsAdd, exprsAddMap := command.GetExprCallback()
 	checkExprs := []expr.NamedExpr{
 		{Name: echoExprName, Exprs: []expr.Expr{expCmdEcho}},
 		{Name: promptExprName, Exprs: []expr.Expr{cli.prompt}},
@@ -603,14 +605,18 @@ func GenericExecute(command cmd.Cmd, connector streamer.Connector, cli GenericCL
 		checkExprs = append(checkExprs, expr.NamedExpr{Name: loginExprName, Exprs: []expr.Expr{cli.login}})
 	}
 	exprs := expr.NewSimpleExprListNamedOrdered(checkExprs)
-
-	exprsAdd, exprsAddMap := command.GetExprCallback()
+	callbackPatternStart := 0
+	for _, namedExpr := range checkExprs {
+		callbackPatternStart += len(namedExpr.Exprs)
+	}
 	for _, exprCB := range exprsAdd {
 		exprs.Add("cb", expr.NewSimpleExpr().FromPattern(exprCB))
 	}
+
 	cbLimit := 100
 	seenEcho := false
 	var lastQuestion []byte // GOP3
+	var lastPromptBeforeEchoError error
 	repeatedQuestionCount := 0
 	for { // pager loop
 		match, err := connector.ReadTo(ctx, exprs)
@@ -623,6 +629,15 @@ func GenericExecute(command cmd.Cmd, connector streamer.Connector, cli GenericCL
 					return nil, outputErr
 				}
 			}
+			// This case means we got prompt without echo previously.
+			// This could mean 2 separate problems, which are hard to distinguish:
+			// 1) Device redraws terminal, partially echoing; we got chunk ending on prompt before device wrote full echo
+			// 2) Prompt/echo is configured incorrect for this device.
+			// For the 1) case we prepend existing buffer and retry read until we read echo. If we receive read error - it was actually 2) case - so we return original error.
+			// gop4 for more details.
+			if lastPromptBeforeEchoError != nil {
+				return nil, lastPromptBeforeEchoError
+			}
 			return nil, err
 		}
 		matchId := match.GetPatternNo()
@@ -631,65 +646,71 @@ func GenericExecute(command cmd.Cmd, connector streamer.Connector, cli GenericCL
 		if matchName == echoExprName {
 			seenEcho = true
 			exprs.Delete(echoExprName)
+			callbackPatternStart--
+			lastPromptBeforeEchoError = nil
 			continue
 		}
 		mbefore := match.GetBefore()
-		if !seenEcho {
-			if matchName == questionExprName { // caught question before echo
-				// check for echo, drop it and proceed with question
-				termParsedEcho, err := terminal.ParseDropLastReturn(mbefore)
-				if err != nil {
-					return nil, fmt.Errorf("echo terminal parse error %w", err)
-				}
-				mres, ok := exprs.Match(termParsedEcho)
-				if !ok {
-					return nil, device.ThrowEchoReadException(mbefore, true)
-				}
-				if exprs.GetName(mres.PatternNo) == echoExprName {
-					seenEcho = true
-				}
-				mbefore = termParsedEcho[mres.End:]
-			}
-		}
-
-		if !seenEcho {
-			promptFound := matchName == promptExprName
-			// case where we caught prompt before echo because of term codes in echo
-			if len(mbefore) < 2 || !promptFound { // don't bother to do complex logic
-				return nil, device.ThrowEchoReadException(mbefore, promptFound)
-			}
-
-			termParsedEcho, err := terminal.ParseDropLastReturn(mbefore)
+		seenPrompt := matchName == promptExprName
+		seenQuestion := matchName == questionExprName
+		checkEcho := func(mBefore []byte) ([]byte, error) {
+			// Check for echo, drop it, and continue handling the matched expression.
+			termParsedEcho, err := terminal.ParseDropLastReturn(mBefore)
 			if err != nil {
-				return nil, fmt.Errorf("echo terminal parse error %w", err)
+				return nil, fmt.Errorf("echo terminal before question parse error %w", err)
 			}
 			mres, ok := exprs.Match(termParsedEcho)
 			if !ok {
-				// prompt expression may consume newline from echo, but it must be presented in echo
-				if mbefore[len(mbefore)-1] != '\n' {
-					mbefore = append(mbefore, '\n')
-				}
-				termParsedEcho, err = terminal.ParseDropLastReturn(mbefore)
-				if err != nil {
-					return nil, fmt.Errorf("echo terminal parse error %w", err)
-				}
-				mres, ok = exprs.Match(termParsedEcho)
-				if !ok {
-					return nil, device.ThrowEchoReadException(mbefore, promptFound)
-				}
+				return nil, device.ThrowEchoReadException(mbefore, seenPrompt, seenQuestion)
 			}
-			// assuring that it is echo
 			if exprs.GetName(mres.PatternNo) != echoExprName {
-				return nil, device.ThrowEchoReadException(mbefore, promptFound)
-			}
-			if mres.End > len(termParsedEcho) {
-				return nil, errors.New("termParsedEcho len less than mres.End")
+				return nil, device.ThrowEchoReadException(mbefore, seenPrompt, seenQuestion)
 			}
 			seenEcho = true
 			exprs.Delete(echoExprName)
-			// delete echo
-			mbefore = termParsedEcho[mres.End:]
+			callbackPatternStart--
+			lastPromptBeforeEchoError = nil
+			return termParsedEcho[mres.End:], nil
 		}
+		if !seenEcho {
+			if len(mbefore) < 2 {
+				return nil, device.ThrowEchoReadException(mbefore, seenPrompt, seenQuestion)
+			}
+			switch {
+			case matchName == questionExprName:
+				// check for echo, drop it and proceed with question
+				mBefore, err := checkEcho(mbefore)
+				if err != nil {
+					return nil, err
+				}
+				mbefore = mBefore
+			case matchName == promptExprName:
+				mBefore, err := checkEcho(mbefore)
+				// prompt expression may consume newline from echo, but it must be presented in echo
+				if err != nil && mbefore[len(mbefore)-1] != '\n' {
+					mBefore, err = checkEcho(append(mbefore, '\n'))
+				}
+				// GOP 4: a CLI may redraw its prompt before the complete echo arrives.
+				// Preserve consumed bytes and retry the normal matcher with them prepended.
+				if err != nil {
+					lastPromptBeforeEchoError = err
+					err := connector.PrependBuffer(mbefore)
+					if err != nil {
+						return nil, fmt.Errorf(
+							"prepend consumed output after prompt-before-echo: %w; %w",
+							err,
+							device.ThrowEchoReadException(mbefore, true, false),
+						)
+					}
+					continue
+				}
+
+				mbefore = mBefore
+			default:
+				return nil, device.ThrowEchoReadException(mbefore, false, false)
+			}
+		}
+
 		if matchName == promptExprName {
 			buffer.Write(mbefore)
 			if store, ok := match.GetMatchedGroups()["store"]; ok {
@@ -732,7 +753,11 @@ func GenericExecute(command cmd.Cmd, connector streamer.Connector, cli GenericCL
 				return nil, fmt.Errorf("callback limit")
 			}
 			cbLimit--
-			wr := exprsAddMap[exprsAdd[matchId-3]]
+			callbackIndex := matchId - callbackPatternStart
+			if callbackIndex < 0 || callbackIndex >= len(exprsAdd) {
+				return nil, fmt.Errorf("invalid callback pattern index %d", matchId)
+			}
+			wr := exprsAddMap[exprsAdd[callbackIndex]]
 			logger.Debug("write callback result")
 			err := connector.Write([]byte(wr))
 			if err != nil {

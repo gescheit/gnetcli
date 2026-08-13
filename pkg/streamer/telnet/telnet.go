@@ -80,6 +80,13 @@ func (m *Streamer) SetReadTimeout(duration time.Duration) time.Duration {
 	return prev
 }
 
+func (m *Streamer) PrependBuffer(data []byte) error {
+	buffer := make([]byte, 0, len(data)+len(m.stdoutBufferExtra))
+	buffer = append(buffer, data...)
+	m.stdoutBufferExtra = append(buffer, m.stdoutBufferExtra...)
+	return nil
+}
+
 func (m *Streamer) SetTrace(cb trace.CB) {
 	m.trace = cb
 }
@@ -174,7 +181,7 @@ func (m *Streamer) Read(context.Context, int) ([]byte, error) {
 
 func (m *Streamer) ReadTo(ctx context.Context, expr expr.Expr) (streamer.ReadRes, error) {
 	m.logger.Debug("read to", zap.String("expr", expr.Repr()))
-	res, extra, read, err := streamer.GenericReadX(ctx, m.stdoutBufferExtra, m.stdoutBuffer, defaultReadSize, m.readTimeout, expr, 0, 0)
+	res, extra, read, err := streamer.GenericReadX(ctx, m.stdoutBufferExtra, m.stdoutBuffer, defaultReadSize, m.readTimeout, streamer.WithRegExpr(expr))
 	if m.trace != nil {
 		m.trace(trace.Read, read)
 	}

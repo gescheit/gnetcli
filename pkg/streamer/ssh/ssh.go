@@ -324,7 +324,7 @@ func (m *Streamer) Read(ctx context.Context, size int) ([]byte, error) {
 			return nil, err
 		}
 	}
-	res, extra, read, err := streamer.GenericReadX(ctx, m.session.stdoutBufferExtra, m.session.stdoutBuffer, defaultReadSize, m.readTimeout, nil, size, 0)
+	res, extra, read, err := streamer.GenericReadX(ctx, m.session.stdoutBufferExtra, m.session.stdoutBuffer, defaultReadSize, m.readTimeout, streamer.WithMaxReadSize(size))
 	if m.trace != nil {
 		m.trace(trace.Read, read)
 	}
@@ -347,7 +347,7 @@ func (m *Streamer) ReadTo(ctx context.Context, expr expr.Expr) (streamer.ReadRes
 			return nil, err
 		}
 	}
-	res, extra, read, err := streamer.GenericReadX(ctx, m.session.stdoutBufferExtra, m.session.stdoutBuffer, defaultReadSize, m.readTimeout, expr, 0, 0)
+	res, extra, read, err := streamer.GenericReadX(ctx, m.session.stdoutBufferExtra, m.session.stdoutBuffer, defaultReadSize, m.readTimeout, streamer.WithRegExpr(expr))
 	if m.trace != nil {
 		m.trace(trace.Read, read)
 	}
@@ -363,6 +363,17 @@ func (m *Streamer) ReadTo(ctx context.Context, expr expr.Expr) (streamer.ReadRes
 		return nil, streamer.ThrowEOFException(streamer.GetLastBytes(read, defaultReadSize))
 	}
 	return res.ExprRes, nil
+}
+
+func (m *Streamer) PrependBuffer(data []byte) error {
+	if m.session == nil {
+		return errors.New("ssh session is not initialized")
+	}
+
+	buffer := make([]byte, 0, len(data)+len(m.session.stdoutBufferExtra))
+	buffer = append(buffer, data...)
+	m.session.stdoutBufferExtra = append(buffer, m.session.stdoutBufferExtra...)
+	return nil
 }
 
 func (m *Streamer) HasFeature(feature streamer.Const) bool {
