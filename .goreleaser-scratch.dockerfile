@@ -6,5 +6,5 @@ LABEL repo="https://github.com/annetutil/gnetcli"
 ENV BASIC_AUTH="mylogin:mysecret"
 COPY server /app/server
 ENTRYPOINT [ "/app/server" ]
-CMD [ "-debug" ]
+CMD [ "-debug", "-port", "0.0.0.0:50051" ]
 
