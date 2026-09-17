@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/annetutil/gnetcli/pkg/testutils"
 
@@ -52,6 +54,7 @@ func main() {
 	devType := flag.String("devtype", "", fmt.Sprintf("Device type from dev-conf file or from predifined: %s", dt))
 	login := flag.String("login", "", "Login")
 	password := flag.String("password", "", "Password")
+	passwordFile := flag.String("password-file", "", "Read password from a UTF-8 file; remove one trailing LF or CRLF")
 	useSSHConfig := flag.Bool("use-ssh-config", false, "Use default ssh config")
 	sshConfigPassphrase := flag.String("ssh-config-passphrase", "", "Passphrase for ssh config's identity file")
 	debug := flag.Bool("debug", false, "Set debug log level")
@@ -59,6 +62,34 @@ func main() {
 	jsonOut := flag.Bool("json", false, "Output in JSON")
 	deviceFiles := flag.String("dev-conf", "", "Path to yaml with device types")
 	flag.Parse()
+	var passwordSet, passwordFileSet bool
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "password":
+			passwordSet = true
+		case "password-file":
+			passwordFileSet = true
+		}
+	})
+	if passwordFileSet {
+		if passwordSet {
+			fmt.Fprintln(os.Stderr, "-password and -password-file are mutually exclusive")
+			os.Exit(2)
+		}
+		data, err := os.ReadFile(*passwordFile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "unable to read password file:", err)
+			os.Exit(2)
+		}
+		if !utf8.Valid(data) {
+			fmt.Fprintln(os.Stderr, "password file is not valid UTF-8")
+			os.Exit(2)
+		}
+		*password = string(data)
+		if strings.HasSuffix(*password, "\n") {
+			*password = strings.TrimSuffix(strings.TrimSuffix(*password, "\n"), "\r")
+		}
+	}
 	logConfig := zap.NewProductionConfig()
 	if *debug {
 		logConfig = zap.NewDevelopmentConfig()

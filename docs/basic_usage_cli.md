@@ -51,3 +51,22 @@ Usage of cli:
   -ssh-config-passphrase string
       Passphrase for IdentityFiles specified in ssh config.
 ```
+
+
+### Password file
+
+Use `-password-file` to keep the password itself out of process arguments:
+
+```shell
+cli -hostname switch.example.test -devtype arista -login mylogin \
+  -password-file /run/secrets/device-password -command 'show clock' -json
+```
+
+The file must contain UTF-8 text. Exactly one final LF or CRLF is removed;
+spaces, a lone CR, and any other preceding content are preserved. Protect the
+file with restrictive permissions (for example, mode 600) and do not commit it.
+
+`-password-file` and `-password` are mutually exclusive, including an explicitly
+empty `-password`. An unreadable file, invalid UTF-8 or conflicting options
+produces an error without printing the password and exits with code 2.
+Existing command-error handling and process exit codes are unchanged.
